@@ -169,9 +169,11 @@ fun ChatListScreen(
                     var showContextMenu by remember { mutableStateOf(false) }
                     
                     Box {
+                        val chatType = chat.type
+                        val isPossibleForum = chatType is TdApi.ChatTypeSupergroup && !chatType.isChannel
                         ChatListItem(
                             chat = chat, 
-                            onClick = { onChatClick(chat.id, chat.viewAsTopics) },
+                            onClick = { onChatClick(chat.id, chat.viewAsTopics || isPossibleForum) },
                             onLongClick = { showContextMenu = true }
                         )
                         
@@ -252,9 +254,11 @@ fun ChatListScreen(
                         }
                     } else {
                         items(globalResults, key = { "global_${it.id}" }) { chat ->
+                            val chatType = chat.type
+                            val isPossibleForum = chatType is TdApi.ChatTypeSupergroup && !chatType.isChannel
                             ChatListItem(
                                 chat = chat,
-                                onClick = { onChatClick(chat.id, chat.viewAsTopics) },
+                                onClick = { onChatClick(chat.id, chat.viewAsTopics || isPossibleForum) },
                                 onLongClick = {}
                             )
                             Divider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))

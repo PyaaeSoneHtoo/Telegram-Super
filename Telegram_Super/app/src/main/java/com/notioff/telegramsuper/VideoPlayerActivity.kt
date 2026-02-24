@@ -82,6 +82,10 @@ fun VideoPlayerScreen(videoPath: String, onClose: () -> Unit) {
                 when (event.type) {
                     MediaPlayer.Event.Playing -> isPlaying = true
                     MediaPlayer.Event.Paused -> isPlaying = false
+                    MediaPlayer.Event.EncounteredError -> {
+                        android.util.Log.e("VLC", "MediaPlayer encountered error")
+                        isPlaying = false
+                    }
                     MediaPlayer.Event.Stopped -> onClose()
                     MediaPlayer.Event.TimeChanged -> currentTime = event.timeChanged
                     MediaPlayer.Event.LengthChanged -> totalTime = event.lengthChanged

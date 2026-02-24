@@ -509,7 +509,10 @@ fun ChatScreen(
                 },
                 actions = {
                     val chatInfo by viewModel.chatInfo.collectAsState()
-                    if (chatInfo?.viewAsTopics == true) {
+                    val chatType = chatInfo?.type
+                    val isPossibleForum = chatType is TdApi.ChatTypeSupergroup && !chatType.isChannel
+                    
+                    if (chatInfo?.viewAsTopics == true || isPossibleForum) {
                         TextButton(onClick = { onShowTopics(chatId) }) {
                             Text("Topics", color = MaterialTheme.colorScheme.onPrimaryContainer)
                         }
