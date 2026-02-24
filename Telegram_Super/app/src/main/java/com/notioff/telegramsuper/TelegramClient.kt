@@ -199,6 +199,7 @@ object TelegramClient {
                         val currentFiles = _downloadedFiles.value.toMutableMap()
                         currentFiles[tdApiObject.file.id] = tdApiObject.file
                         _downloadedFiles.value = currentFiles
+                        Log.d("TDLibFile", "UpdateFile: id=${tdApiObject.file.id}, downloaded=${tdApiObject.file.local.downloadedSize}/${tdApiObject.file.size}, path=${tdApiObject.file.local.path}")
                         
                         // Handle download notifications only for user-requested files
                         if (userRequestedFileIds.contains(tdApiObject.file.id)) {

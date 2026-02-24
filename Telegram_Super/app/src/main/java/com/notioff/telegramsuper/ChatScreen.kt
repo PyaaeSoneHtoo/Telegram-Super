@@ -219,14 +219,14 @@ fun VideoContentView(videoFile: TdApi.File, thumbFile: TdApi.File?, fileName: St
                 FilledIconButton(
                     onClick = {
                         if (localVideoFile.local.path.isNotEmpty()) {
-                            if (!localVideoFile.local.isDownloadingCompleted && !localVideoFile.local.isDownloadingActive) {
-                                TelegramClient.downloadFile(localVideoFile.id, priority = 32, synchronous = false, isUserRequested = true)
-                            }
+                            // Always call download with high priority to ensure it's max speed
+                            TelegramClient.downloadFile(localVideoFile.id, priority = 32, synchronous = false, isUserRequested = true)
                             context.startActivity(Intent(context, VideoPlayerActivity::class.java).apply {
                                 putExtra("video_path", localVideoFile.local.path)
                             })
                         } else {
                             state = VideoState.DownloadingForWatch
+                            Toast.makeText(context, "Download started...", Toast.LENGTH_SHORT).show()
                             TelegramClient.downloadFile(localVideoFile.id, priority = 32, synchronous = false, isUserRequested = true)
                         }
                     },
@@ -244,6 +244,7 @@ fun VideoContentView(videoFile: TdApi.File, thumbFile: TdApi.File?, fileName: St
                             }
                         } else {
                             state = VideoState.DownloadingForExport
+                            Toast.makeText(context, "Download started...", Toast.LENGTH_SHORT).show()
                             TelegramClient.downloadFile(localVideoFile.id, priority = 32, synchronous = false, isUserRequested = true)
                         }
                     },

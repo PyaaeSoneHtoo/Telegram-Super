@@ -120,9 +120,15 @@ fun VideoPlayerScreen(videoPath: String, onClose: () -> Unit) {
             factory = { ctx ->
                 VLCVideoLayout(ctx).apply {
                     mediaPlayer.attachViews(this, null, false, false)
-                    val media = Media(libVlc, videoPath)
-                    mediaPlayer.media = media
-                    mediaPlayer.play()
+                    try {
+                        val media = Media(libVlc, videoPath)
+                        mediaPlayer.media = media
+                        mediaPlayer.play()
+                    } catch (e: Exception) {
+                        android.util.Log.e("VLC", "Failed to load media: ${e.message}")
+                        android.widget.Toast.makeText(ctx, "Failed to load video", android.widget.Toast.LENGTH_SHORT).show()
+                        onClose()
+                    }
                 }
             },
             modifier = Modifier.fillMaxSize(),
