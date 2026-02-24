@@ -45,7 +45,11 @@ class VideoPlayerActivity : ComponentActivity() {
             controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
 
-        val videoPath = intent.getStringExtra("video_path") ?: return finish()
+        val videoPath = intent.getStringExtra("video_path")
+        if (videoPath.isNullOrEmpty()) {
+            android.util.Log.e("VideoPlayer", "Video path is null or empty")
+            return finish()
+        }
 
         setContent {
             MaterialTheme {

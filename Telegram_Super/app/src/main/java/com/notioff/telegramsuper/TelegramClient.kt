@@ -388,7 +388,7 @@ object TelegramClient {
         }
     }
     
-    fun downloadFile(fileId: Int, priority: Int = 1, synchronous: Boolean = true, isUserRequested: Boolean = false) {
+    fun downloadFile(fileId: Int, priority: Int = 1, synchronous: Boolean = false, isUserRequested: Boolean = false) {
         val finalPriority = if (isUserRequested) 32 else priority
         if (isUserRequested) {
             userRequestedFileIds.add(fileId)

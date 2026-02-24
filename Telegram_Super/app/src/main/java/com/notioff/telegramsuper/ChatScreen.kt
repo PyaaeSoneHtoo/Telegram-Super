@@ -244,7 +244,7 @@ fun VideoContentView(videoFile: TdApi.File, thumbFile: TdApi.File?, fileName: St
                             }
                         } else {
                             state = VideoState.DownloadingForExport
-                            TelegramClient.downloadFile(localVideoFile.id, isUserRequested = true)
+                            TelegramClient.downloadFile(localVideoFile.id, priority = 32, synchronous = false, isUserRequested = true)
                         }
                     },
                     modifier = Modifier.size(56.dp)
