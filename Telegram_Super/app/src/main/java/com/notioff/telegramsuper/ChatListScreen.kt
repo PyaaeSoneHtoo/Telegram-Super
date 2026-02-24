@@ -1,7 +1,8 @@
 package com.notioff.telegramsuper
 
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -12,8 +13,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -26,38 +32,125 @@ import java.util.*
 @Composable
 fun ChatListScreen(
     viewModel: ChatListViewModel = viewModel(),
-    onChatClick: (Long) -> Unit,
+    onChatClick: (Long, Boolean) -> Unit,
     onSettingsClick: () -> Unit
 ) {
     val chats by viewModel.chatList.collectAsState()
+    val folders by viewModel.folders.collectAsState()
+    val currentVirtualId by viewModel.currentVirtualFolderId.collectAsState()
+    var isSearchActive by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
+    val focusRequester = remember { FocusRequester() }
+    var globalResults by remember { mutableStateOf<List<TdApi.Chat>>(emptyList()) }
+    var isGlobalSearching by remember { mutableStateOf(false) }
+
+    // Local filter
+    val localMatches = if (isSearchActive && searchQuery.isNotBlank()) {
+        chats.filter { it.title.contains(searchQuery, ignoreCase = true) }
+    } else chats
+
+    // Debounced global search
+    LaunchedEffect(searchQuery) {
+        if (isSearchActive && searchQuery.length >= 2) {
+            isGlobalSearching = true
+            kotlinx.coroutines.delay(400)
+            TelegramClient.searchChatsGlobal(searchQuery) { results ->
+                // Filter out chats already in local list
+                val localIds = localMatches.map { it.id }.toSet()
+                globalResults = results.filter { it.id !in localIds }
+                isGlobalSearching = false
+            }
+        } else {
+            globalResults = emptyList()
+        }
+    }
+
+    val displayedChats = localMatches
+
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text("Telegram Super v1.5", fontWeight = FontWeight.Bold) },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
-                ),
-                actions = {
-                    IconButton(onClick = { /* Handle search click */ }) {
-                        Icon(
-                            imageVector = Icons.Default.Search,
-                            contentDescription = "Search",
-                            tint = MaterialTheme.colorScheme.onPrimaryContainer
-                        )
+            Column {
+                TopAppBar(
+                    title = {
+                        if (isSearchActive) {
+                            TextField(
+                                value = searchQuery,
+                                onValueChange = { searchQuery = it },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .focusRequester(focusRequester),
+                                placeholder = { Text("Search chats...") },
+                                singleLine = true,
+                                colors = TextFieldDefaults.colors(
+                                    focusedContainerColor = Color.Transparent,
+                                    unfocusedContainerColor = Color.Transparent,
+                                    focusedIndicatorColor = Color.Transparent,
+                                    unfocusedIndicatorColor = Color.Transparent
+                                )
+                            )
+                            LaunchedEffect(Unit) { focusRequester.requestFocus() }
+                        } else {
+                            Text("Telegram Super v1.5", fontWeight = FontWeight.Bold)
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                        titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                    ),
+                    actions = {
+                        if (isSearchActive) {
+                            IconButton(onClick = {
+                                isSearchActive = false
+                                searchQuery = ""
+                            }) {
+                                Icon(Icons.Default.Close, contentDescription = "Close search",
+                                    tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                            }
+                        } else {
+                            IconButton(onClick = { isSearchActive = true }) {
+                                Icon(Icons.Default.Search, contentDescription = "Search",
+                                    tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                            }
+                            IconButton(onClick = onSettingsClick) {
+                                Icon(Icons.Default.Settings, contentDescription = "Settings",
+                                    tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                            }
+                        }
                     }
-                    IconButton(onClick = onSettingsClick) {
-                        Icon(
-                            imageVector = Icons.Default.Settings,
-                            contentDescription = "Settings",
-                            tint = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+                
+                // Tabs for folders
+                val virtualTabs = listOf(
+                    TelegramClient.VIRTUAL_ID_ALL to "All",
+                    TelegramClient.VIRTUAL_ID_PERSONAL to "Personal",
+                    TelegramClient.VIRTUAL_ID_GROUPS to "Groups",
+                    TelegramClient.VIRTUAL_ID_CHANNELS to "Channels"
+                )
+                
+                val allFolderItems = virtualTabs.map { it.first to it.second } + 
+                                  folders.map { it.id to it.name.text.text }
+                
+                val selectedIndex = allFolderItems.indexOfFirst { it.first == currentVirtualId }.coerceAtLeast(0)
+                
+                ScrollableTabRow(
+                    selectedTabIndex = selectedIndex,
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    edgePadding = 16.dp,
+                    divider = {}
+                ) {
+                    allFolderItems.forEach { (id, name) ->
+                        Tab(
+                            selected = currentVirtualId == id,
+                            onClick = { viewModel.selectFolder(id) },
+                            text = { Text(name, style = MaterialTheme.typography.labelLarge) }
                         )
                     }
                 }
-            )
+            }
         }
     ) { paddingValues ->
-        if (chats.isEmpty()) {
+        if (displayedChats.isEmpty() && !isSearchActive) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -72,21 +165,117 @@ fun ChatListScreen(
                     .fillMaxSize()
                     .padding(paddingValues)
             ) {
-                items(chats, key = { it.id }) { chat ->
-                    ChatListItem(chat = chat, onClick = { onChatClick(chat.id) })
+                items(displayedChats, key = { it.id }) { chat ->
+                    var showContextMenu by remember { mutableStateOf(false) }
+                    
+                    Box {
+                        ChatListItem(
+                            chat = chat, 
+                            onClick = { onChatClick(chat.id, chat.viewAsTopics) },
+                            onLongClick = { showContextMenu = true }
+                        )
+                        
+                        DropdownMenu(
+                            expanded = showContextMenu,
+                            onDismissRequest = { showContextMenu = false }
+                        ) {
+                            val isPinned = chat.positions.any { it.isPinned }
+                            DropdownMenuItem(
+                                text = { Text(if (isPinned) "Unpin" else "Pin") },
+                                onClick = {
+                                    viewModel.pinChat(chat.id, !isPinned)
+                                    showContextMenu = false
+                                },
+                                leadingIcon = { Icon(Icons.Default.PushPin, contentDescription = null) }
+                            )
+                            val isUnread = chat.unreadCount > 0 || chat.isMarkedAsUnread
+                            DropdownMenuItem(
+                                text = { Text(if (isUnread) "Mark as Read" else "Mark as Unread") },
+                                onClick = {
+                                    viewModel.markAsUnread(chat.id, !isUnread)
+                                    showContextMenu = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Clear History") },
+                                onClick = {
+                                    viewModel.clearHistory(chat.id, false)
+                                    showContextMenu = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Delete Chat") },
+                                onClick = {
+                                    viewModel.deleteChat(chat.id)
+                                    showContextMenu = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Block / Leave") },
+                                onClick = {
+                                    viewModel.blockChat(chat)
+                                    showContextMenu = false
+                                }
+                            )
+                        }
+                    }
                     Divider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+                }
+
+                // Global search section below local results
+                if (isSearchActive && searchQuery.length >= 2) {
+                    item {
+                        Text(
+                            text = "Global Results",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                        )
+                    }
+                    if (isGlobalSearching) {
+                        item {
+                            Box(
+                                modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                            }
+                        }
+                    } else if (globalResults.isEmpty()) {
+                        item {
+                            Text(
+                                text = "No global results",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                            )
+                        }
+                    } else {
+                        items(globalResults, key = { "global_${it.id}" }) { chat ->
+                            ChatListItem(
+                                chat = chat,
+                                onClick = { onChatClick(chat.id, chat.viewAsTopics) },
+                                onLongClick = {}
+                            )
+                            Divider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+                        }
+                    }
                 }
             }
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun ChatListItem(chat: TdApi.Chat, onClick: () -> Unit) {
+fun ChatListItem(chat: TdApi.Chat, onClick: () -> Unit, onLongClick: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -142,25 +331,46 @@ fun ChatListItem(chat: TdApi.Chat, onClick: () -> Unit) {
                     format.format(date)
                 } ?: ""
                 
-                Text(
-                    text = timeStr,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                val isPinned = chat.positions.any { it.isPinned }
+                
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (isPinned) {
+                        Icon(
+                            imageVector = Icons.Default.PushPin,
+                            contentDescription = "Pinned",
+                            modifier = Modifier.size(14.dp).padding(end = 4.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    Text(
+                        text = timeStr,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
             
             Spacer(modifier = Modifier.height(4.dp))
             
             val lastMessageText = when (val content = chat.lastMessage?.content) {
                 is TdApi.MessageText -> content.text.text
-                is TdApi.MessagePhoto -> "📷 Photo"
-                is TdApi.MessageVideo -> "🎥 Video"
-                is TdApi.MessageAnimation -> "GIF"
-                is TdApi.MessageSticker -> "Sticker"
-                is TdApi.MessageDocument -> "📄 Document"
-                is TdApi.MessageVoiceNote -> "🎤 Voice"
+                is TdApi.MessagePhoto -> "📷 Photo" + if (content.caption.text.isNotEmpty()) ": ${content.caption.text}" else ""
+                is TdApi.MessageVideo -> "🎥 Video" + if (content.caption.text.isNotEmpty()) ": ${content.caption.text}" else ""
+                is TdApi.MessageAnimation -> "🎬 GIF"
+                is TdApi.MessageSticker -> "${content.sticker.emoji} Sticker"
+                is TdApi.MessageAnimatedEmoji -> "${content.emoji} Animated emoji"
+                is TdApi.MessageDocument -> "📄 ${content.document.fileName.ifEmpty { "Document" }}"
+                is TdApi.MessageVoiceNote -> "🎤 Voice message"
+                is TdApi.MessageAudio -> "🎵 ${content.audio.title.ifEmpty { "Audio" }}"
+                is TdApi.MessageVideoNote -> "📹 Video message"
+                is TdApi.MessageContact -> "👤 Contact"
+                is TdApi.MessageLocation -> "📍 Location"
+                is TdApi.MessagePoll -> "📊 ${content.poll.question.text}"
+                is TdApi.MessageCall -> "📞 Call"
+                is TdApi.MessagePinMessage -> "📌 Pinned a message"
+                is TdApi.MessageGameScore -> "🎮 Game score"
                 null -> "No messages yet"
-                else -> "Unsupported message"
+                else -> ""
             }
             
             Text(

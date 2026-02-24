@@ -2,7 +2,6 @@ package com.notioff.telegramsuper
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
@@ -11,16 +10,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import org.drinkless.tdlib.TdApi
-import android.os.Build
-import android.Manifest
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
-        // Initialize TDLib
         TelegramClient.initialize(applicationContext)
         
         setContent {
@@ -45,41 +38,28 @@ class MainActivity : ComponentActivity() {
                 ) {
                     val authState by TelegramClient.authState.collectAsState()
                     var currentScreen by remember { mutableStateOf<Screen>(Screen.Main) }
-                    
-                    val permissionLauncher = rememberLauncherForActivityResult(
-                        ActivityResultContracts.RequestPermission()
-                    ) { isGranted ->
-                        // Record or ignore if rejected
-                    }
-                    
-                    LaunchedEffect(Unit) {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                            permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                        }
-                    }
 
                     when (authState) {
                         is TdApi.AuthorizationStateReady -> {
-                            BackHandler(enabled = currentScreen != Screen.Main) {
-                                currentScreen = Screen.Main
-                            }
                             when (currentScreen) {
                                 Screen.Main -> {
                                     ChatListScreen(
-                                        onChatClick = { chatId ->
-                                            currentScreen = Screen.Chat(chatId)
+                                        onChatClick = { chatId, isForum -> 
+                                            if (isForum) {
+                                                currentScreen = Screen.ForumTopics(chatId)
+                                            } else {
+                                                currentScreen = Screen.Chat(chatId)
+                                            }
                                         },
-                                        onSettingsClick = {
-                                            currentScreen = Screen.Settings
-                                        }
+                                        onSettingsClick = { currentScreen = Screen.Settings }
                                     )
                                 }
                                 Screen.Settings -> {
                                     SettingsScreen(
                                         onBack = { currentScreen = Screen.Main },
-                                        onLogout = { TelegramClient.logOut() },
                                         onPrivacyClick = { currentScreen = Screen.Privacy },
-                                        onStorageClick = { currentScreen = Screen.StorageSettings }
+                                        onStorageClick = { currentScreen = Screen.StorageSettings },
+                                        onLogout = { TelegramClient.logOut() }
                                     )
                                 }
                                 Screen.StorageSettings -> {
@@ -96,8 +76,34 @@ class MainActivity : ComponentActivity() {
                                 is Screen.Chat -> {
                                     ChatScreen(
                                         chatId = (currentScreen as Screen.Chat).chatId,
-                                        onBack = { currentScreen = Screen.Main }
+                                        threadId = (currentScreen as Screen.Chat).threadId,
+                                        onBack = { 
+                                            val chat = currentScreen as Screen.Chat
+                                            if (chat.threadId != 0L) {
+                                                currentScreen = Screen.ForumTopics(chat.chatId)
+                                            } else {
+                                                currentScreen = Screen.Main 
+                                            }
+                                        },
+                                        onNavigateToChat = { chatId ->
+                                            currentScreen = Screen.Chat(chatId)
+                                        },
+                                        onShowTopics = { chatId ->
+                                            currentScreen = Screen.ForumTopics(chatId)
+                                        }
                                     )
+                                }
+                                is Screen.ForumTopics -> {
+                                     ForumTopicsScreen(
+                                         chatId = (currentScreen as Screen.ForumTopics).chatId,
+                                         onTopicClick = { threadId ->
+                                             currentScreen = Screen.Chat((currentScreen as Screen.ForumTopics).chatId, threadId)
+                                         },
+                                         onBack = { currentScreen = Screen.Main },
+                                         onShowRawChat = { chatId ->
+                                             currentScreen = Screen.Chat(chatId, 0)
+                                         }
+                                     )
                                 }
                             }
                         }
@@ -121,5 +127,6 @@ sealed class Screen {
     object Settings : Screen()
     object Privacy : Screen()
     object StorageSettings : Screen()
-    data class Chat(val chatId: Long) : Screen()
+    data class Chat(val chatId: Long, val threadId: Long = 0) : Screen()
+    data class ForumTopics(val chatId: Long) : Screen()
 }

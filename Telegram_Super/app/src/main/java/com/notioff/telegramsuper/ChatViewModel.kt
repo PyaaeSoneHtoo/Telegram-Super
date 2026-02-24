@@ -9,7 +9,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import org.drinkless.tdlib.TdApi
 
-class ChatViewModel(private val chatId: Long) : ViewModel() {
+class ChatViewModel(private val chatId: Long, private val threadId: Long = 0) : ViewModel() {
 
     private val _chatInfo = MutableStateFlow<TdApi.Chat?>(null)
     val chatInfo: StateFlow<TdApi.Chat?> = _chatInfo.asStateFlow()
@@ -22,13 +22,29 @@ class ChatViewModel(private val chatId: Long) : ViewModel() {
     private val _topicNames = MutableStateFlow<Map<Long, String>>(emptyMap())
     val topicNames: StateFlow<Map<Long, String>> = _topicNames.asStateFlow()
     
+    private val _pinnedMessage = MutableStateFlow<TdApi.Message?>(null)
+    val pinnedMessage: StateFlow<TdApi.Message?> = _pinnedMessage.asStateFlow()
+    
+    private val _pinnedMessagesList = MutableStateFlow<List<TdApi.Message>>(emptyList())
+    val pinnedMessagesList: StateFlow<List<TdApi.Message>> = _pinnedMessagesList.asStateFlow()
+
+    val userStatuses: StateFlow<Map<Long, TdApi.UserStatus>> = TelegramClient.userStatuses
+    
     var isEndReached = false
-        private set
-        
     private var isLoading = false
 
+    fun deleteMessages(messageIds: LongArray, revoke: Boolean) {
+        TelegramClient.deleteMessages(chatId, messageIds, revoke)
+    }
+
+    fun loadPinnedMessages() {
+        TelegramClient.getPinnedMessages(chatId) { msgs ->
+            _pinnedMessagesList.value = msgs
+        }
+    }
+
     fun activate() {
-        TelegramClient.openChat(chatId)
+        TelegramClient.openChat(chatId, threadId)
         loadChatInfo()
         loadInitialMessages()
     }
@@ -46,7 +62,8 @@ class ChatViewModel(private val chatId: Long) : ViewModel() {
                 var hasTopicUpdates = false
                 
                 msgs.forEach { msg ->
-                    if (msg.topicId is TdApi.MessageTopicForum) {
+                    // Only fetch topic info if we are in the main chat (threadId == 0)
+                    if (threadId == 0L && msg.topicId is TdApi.MessageTopicForum) {
                         val forumTopicId = (msg.topicId as TdApi.MessageTopicForum).forumTopicId.toLong()
                         if (!newTopics.containsKey(forumTopicId)) {
                             newTopics[forumTopicId] = "..."
@@ -126,10 +143,23 @@ class ChatViewModel(private val chatId: Long) : ViewModel() {
         TelegramClient.getChatInfo(chatId) { chat ->
             _chatInfo.value = chat
         }
+        TelegramClient.getChatPinnedMessage(chatId) { message ->
+            _pinnedMessage.value = message
+        }
     }
 
     private fun loadInitialMessages() {
-        TelegramClient.loadMessages(chatId, limit = 50)
+        TelegramClient.loadMessages(chatId, threadId, limit = 50)
+    }
+
+    /** Load messages anchored at [messageId] and return the index of that message in the result. */
+    fun loadMessagesFromId(messageId: Long, onLoaded: (targetIndex: Int) -> Unit) {
+        isEndReached = false
+        // fromMessageId = messageId+1, offset=0 → returns messages <= messageId (inclusive trick)
+        // Actually GetChatHistory returns messages with id < fromMessageId, so use messageId+1
+        TelegramClient.loadMessagesFromId(chatId, threadId, messageId) { idx ->
+            onLoaded(idx)
+        }
     }
 
     fun loadMoreMessages() {
@@ -139,7 +169,7 @@ class ChatViewModel(private val chatId: Long) : ViewModel() {
         if (currentMessages.isNotEmpty()) {
             isLoading = true
             val lastMessageId = currentMessages.last().id
-            TelegramClient.loadMessages(chatId, fromMessageId = lastMessageId, limit = 50) { loadedCount ->
+            TelegramClient.loadMessages(chatId, threadId, fromMessageId = lastMessageId, limit = 50) { loadedCount ->
                 isLoading = false
                 if (loadedCount == 0) {
                     isEndReached = true
@@ -150,8 +180,12 @@ class ChatViewModel(private val chatId: Long) : ViewModel() {
 
     fun sendMessage(text: String) {
         if (text.isNotBlank()) {
-            TelegramClient.sendMessage(chatId, text)
+            TelegramClient.sendMessage(chatId, text, threadId)
         }
+    }
+
+    fun sendMedia(filePath: String, mimeType: String) {
+        TelegramClient.sendMediaMessage(chatId, filePath, mimeType, threadId)
     }
 
     override fun onCleared() {
@@ -160,11 +194,11 @@ class ChatViewModel(private val chatId: Long) : ViewModel() {
     }
 }
 
-class ChatViewModelFactory(private val chatId: Long) : ViewModelProvider.Factory {
+class ChatViewModelFactory(private val chatId: Long, private val threadId: Long = 0) : ViewModelProvider.Factory {
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         if (modelClass.isAssignableFrom(ChatViewModel::class.java)) {
             @Suppress("UNCHECKED_CAST")
-            return ChatViewModel(chatId) as T
+            return ChatViewModel(chatId, threadId) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class")
     }

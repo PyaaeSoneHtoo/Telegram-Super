@@ -68,4 +68,7 @@ dependencies {
     
     // Video playback
     implementation("org.videolan.android:libvlc-all:3.6.0-eap5")
+    
+    // Lottie for animated stickers
+    implementation("com.airbnb.android:lottie-compose:6.3.0")
 }

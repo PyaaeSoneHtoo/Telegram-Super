@@ -9,10 +9,17 @@ import org.drinkless.tdlib.TdApi
 import java.io.File
 import android.content.Context
 import kotlinx.coroutines.flow.asStateFlow
+import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 
 object TelegramClient {
     private var client: Client? = null
     private var appContext: Context? = null
+    
+    const val VIRTUAL_ID_ALL = -1
+    const val VIRTUAL_ID_PERSONAL = -2
+    const val VIRTUAL_ID_GROUPS = -3
+    const val VIRTUAL_ID_CHANNELS = -4
     
     private var apiId: Int = 0
     private var apiHash: String = ""
@@ -36,17 +43,77 @@ object TelegramClient {
     private val _downloadedFiles = MutableStateFlow<Map<Int, TdApi.File>>(emptyMap())
     val downloadedFiles: StateFlow<Map<Int, TdApi.File>> = _downloadedFiles.asStateFlow()
     
+    private val _chatFolders = MutableStateFlow<List<TdApi.ChatFolderInfo>>(emptyList())
+    val chatFolders: StateFlow<List<TdApi.ChatFolderInfo>> = _chatFolders.asStateFlow()
+    
+    private val _currentChatList = MutableStateFlow<TdApi.ChatList>(TdApi.ChatListMain())
+    val currentChatList: StateFlow<TdApi.ChatList> = _currentChatList.asStateFlow()
+    
+    private val _currentVirtualFolderId = MutableStateFlow<Int>(VIRTUAL_ID_ALL)
+    val currentVirtualFolderId: StateFlow<Int> = _currentVirtualFolderId.asStateFlow()
+    
+    private val userRequestedFileIds = Collections.synchronizedSet(mutableSetOf<Int>())
+    private val userStatusMap = java.util.concurrent.ConcurrentHashMap<Long, TdApi.UserStatus>()
+    private val _userStatuses = MutableStateFlow<Map<Long, TdApi.UserStatus>>(emptyMap())
+    val userStatuses: StateFlow<Map<Long, TdApi.UserStatus>> = _userStatuses.asStateFlow()
+    
     private var currentChatId: Long? = null
+    private var currentThreadId: Long = 0L
     
     private var notificationManager: DownloadNotificationManager? = null
 
     private fun updateChatList() {
-        val sorted = chatMap.values.filter { chat ->
-            chat.positions.any { it.list is TdApi.ChatListMain }
-        }.sortedByDescending { chat ->
-            chat.positions.first { it.list is TdApi.ChatListMain }.order
+        val currentList = _currentChatList.value
+        val virtualId = _currentVirtualFolderId.value
+        
+        // Base chats for the selected TDLib list (Main or explicit Folder)
+        val filtered = chatMap.values.filter { chat ->
+            chat.positions.any { isSameChatList(it.list, currentList) }
+        }
+        
+        // Secondary filtering for virtual folders (only applies if we are in ChatListMain according to the plan)
+        val virtualFiltered = if (currentList is TdApi.ChatListMain) {
+            when (virtualId) {
+                VIRTUAL_ID_PERSONAL -> filtered.filter { chat ->
+                    chat.type is TdApi.ChatTypePrivate || chat.type is TdApi.ChatTypeSecret
+                }
+                VIRTUAL_ID_GROUPS -> filtered.filter { chat ->
+                    val type = chat.type
+                    type is TdApi.ChatTypeBasicGroup || (type is TdApi.ChatTypeSupergroup && !type.isChannel)
+                }
+                VIRTUAL_ID_CHANNELS -> filtered.filter { chat ->
+                    val type = chat.type
+                    type is TdApi.ChatTypeSupergroup && type.isChannel
+                }
+                else -> filtered
+            }
+        } else {
+            filtered
+        }
+
+        val sorted = virtualFiltered.sortedByDescending { chat ->
+            chat.positions.first { isSameChatList(it.list, currentList) }.order
         }
         _chatList.value = sorted
+    }
+
+    private fun isSameChatList(l1: TdApi.ChatList, l2: TdApi.ChatList): Boolean {
+        if (l1.constructor != l2.constructor) return false
+        if (l1 is TdApi.ChatListFolder && l2 is TdApi.ChatListFolder) {
+            return l1.chatFolderId == l2.chatFolderId
+        }
+        return true
+    }
+
+    fun setChatList(chatListId: Int) {
+        _currentVirtualFolderId.value = chatListId
+        val tdLibList = when {
+            chatListId >= 0 -> TdApi.ChatListFolder(chatListId)
+            else -> TdApi.ChatListMain()
+        }
+        _currentChatList.value = tdLibList
+        updateChatList()
+        client?.send(TdApi.LoadChats(tdLibList, 100)) { }
     }
 
     fun initialize(context: Context) {
@@ -94,7 +161,7 @@ object TelegramClient {
                     is TdApi.UpdateChatPosition -> {
                         val chat = chatMap[tdApiObject.chatId]
                         if (chat != null) {
-                            val newPositions = chat.positions.filter { it.list.constructor != tdApiObject.position.list.constructor }.toMutableList()
+                            val newPositions = chat.positions.filter { !isSameChatList(it.list, tdApiObject.position.list) }.toMutableList()
                             if (tdApiObject.position.order != 0L) {
                                 newPositions.add(tdApiObject.position)
                             }
@@ -121,22 +188,32 @@ object TelegramClient {
                         chatMap[tdApiObject.chatId]?.photo = tdApiObject.photo
                         updateChatList()
                     }
+                    is TdApi.UpdateChatFolders -> {
+                        _chatFolders.value = tdApiObject.chatFolders.toList()
+                    }
+                    is TdApi.UpdateUserStatus -> {
+                        userStatusMap[tdApiObject.userId] = tdApiObject.status
+                        _userStatuses.value = userStatusMap.toMap()
+                    }
                     is TdApi.UpdateFile -> {
                         val currentFiles = _downloadedFiles.value.toMutableMap()
                         currentFiles[tdApiObject.file.id] = tdApiObject.file
                         _downloadedFiles.value = currentFiles
                         
-                        // Handle download notifications
-                        val fileLocal = tdApiObject.file.local
-                        if (fileLocal.isDownloadingActive) {
-                            val progress = if (tdApiObject.file.size > 0) {
-                                ((fileLocal.downloadedSize.toFloat() / tdApiObject.file.size.toFloat()) * 100).toInt()
-                            } else {
-                                0
+                        // Handle download notifications only for user-requested files
+                        if (userRequestedFileIds.contains(tdApiObject.file.id)) {
+                            val fileLocal = tdApiObject.file.local
+                            if (fileLocal.isDownloadingActive) {
+                                val progress = if (tdApiObject.file.size > 0) {
+                                    ((fileLocal.downloadedSize.toFloat() / tdApiObject.file.size.toFloat()) * 100).toInt()
+                                } else {
+                                    0
+                                }
+                                notificationManager?.showDownloadProgress(tdApiObject.file.id, progress, "File ${tdApiObject.file.id}")
+                            } else if (fileLocal.isDownloadingCompleted && fileLocal.downloadedSize > 0) {
+                                notificationManager?.downloadComplete(tdApiObject.file.id, "File ${tdApiObject.file.id}")
+                                userRequestedFileIds.remove(tdApiObject.file.id)
                             }
-                            notificationManager?.showDownloadProgress(tdApiObject.file.id, progress, "File ${tdApiObject.file.id}")
-                        } else if (fileLocal.isDownloadingCompleted && fileLocal.downloadedSize > 0) {
-                            notificationManager?.downloadComplete(tdApiObject.file.id, "File ${tdApiObject.file.id}")
                         }
                     }
                     else -> {
@@ -290,6 +367,9 @@ object TelegramClient {
     fun getUser(userId: Long, onResult: (TdApi.User?) -> Unit) {
         client?.send(TdApi.GetUser(userId)) { result ->
             if (result is TdApi.User) {
+                // Cache the status from the user object
+                userStatusMap[userId] = result.status
+                _userStatuses.value = userStatusMap.toMap()
                 onResult(result)
             } else {
                 onResult(null)
@@ -308,10 +388,15 @@ object TelegramClient {
         }
     }
     
-    fun downloadFile(fileId: Int, priority: Int = 1, synchronous: Boolean = true) {
-        client?.send(TdApi.DownloadFile(fileId, priority, 0, 0, synchronous)) { result ->
+    fun downloadFile(fileId: Int, priority: Int = 1, synchronous: Boolean = true, isUserRequested: Boolean = false) {
+        val finalPriority = if (isUserRequested) 32 else priority
+        if (isUserRequested) {
+            userRequestedFileIds.add(fileId)
+        }
+        client?.send(TdApi.DownloadFile(fileId, finalPriority, 0, 0, synchronous)) { result ->
             if (result is TdApi.Error) {
                 Log.e("TDLib", "Failed to download file $fileId: ${result.message}")
+                if (isUserRequested) userRequestedFileIds.remove(fileId)
             }
         }
     }
@@ -386,8 +471,9 @@ object TelegramClient {
         }
     }
 
-    fun openChat(chatId: Long) {
+    fun openChat(chatId: Long, threadId: Long = 0L) {
         currentChatId = chatId
+        currentThreadId = threadId
         _messagesFlow.value = emptyList()
         client?.send(TdApi.OpenChat(chatId)) { }
     }
@@ -399,30 +485,69 @@ object TelegramClient {
         client?.send(TdApi.CloseChat(chatId)) { }
     }
 
-    fun loadMessages(chatId: Long, fromMessageId: Long = 0, limit: Int = 50, onResult: (Int) -> Unit = {}) {
-        // If getting initial messages, use offset 0 to start from newest
-        client?.send(TdApi.GetChatHistory(chatId, fromMessageId, 0, limit, false)) { result ->
-            if (chatId != currentChatId) {
-                Log.d("TDLibChat", "Ignoring messages for old chat $chatId")
+    fun loadMessages(chatId: Long, threadId: Long = 0, fromMessageId: Long = 0, limit: Int = 50, retryCount: Int = 0, onResult: (Int) -> Unit = {}) {
+        val function = if (threadId != 0L) {
+            // For forum topics: use the dedicated GetForumTopicHistory API
+            TdApi.GetForumTopicHistory(chatId, threadId.toInt(), fromMessageId, 0, limit)
+        } else {
+            TdApi.GetChatHistory(chatId, fromMessageId, 0, limit, false)
+        }
+        
+        client?.send(function) { result ->
+            // Reject messages that don't belong to the currently open chat+thread
+            if (chatId != currentChatId || threadId != currentThreadId) {
+                Log.d("TDLibChat", "Ignoring stale messages for chat $chatId thread $threadId (current: $currentChatId/$currentThreadId)")
                 return@send
             }
             if (result is TdApi.Messages) {
-                Log.d("TDLibChat", "Loaded ${result.messages.size} messages for chat $chatId, totalCount = ${result.totalCount}")
+                Log.d("TDLibChat", "Loaded ${result.messages.size} messages for chat $chatId (thread $threadId)")
                 val currentList = if (fromMessageId == 0L) emptyList() else _messagesFlow.value
                 val newList = currentList + result.messages
                 _messagesFlow.value = newList.distinctBy { it.id }.sortedByDescending { it.date }
                 onResult(result.messages.size)
             } else if (result is TdApi.Error) {
-                Log.e("TDLibChat", "GetChatHistory error: ${result.code} - ${result.message}")
+                Log.e("TDLibChat", "Load messages error: ${result.code} - ${result.message}")
                 onResult(0)
             } else {
-                Log.w("TDLibChat", "GetChatHistory unexpected result: $result")
+                Log.w("TDLibChat", "Load messages unexpected result: $result")
                 onResult(0)
             }
         }
     }
 
-    fun sendMessage(chatId: Long, text: String) {
+    /**
+     * Load messages around [targetMessageId]. Clears current messages and loads 50 messages
+     * ending at (and including) the target message, plus some newer ones.
+     * Calls [onLoaded] with the index of the target message in the new list (for scrolling).
+     */
+    fun loadMessagesFromId(chatId: Long, threadId: Long, targetMessageId: Long, onLoaded: (Int) -> Unit) {
+        // Load 25 messages older than target and keep the target itself
+        // GetChatHistory/GetForumTopicHistory: fromMessageId=target gives messages < target
+        // Use targetMessageId+1 as fromMessageId to include the target
+        val fromMessageId = targetMessageId + 1
+        val limit = 50
+
+        val function: TdApi.Function<TdApi.Messages> = if (threadId != 0L) {
+            TdApi.GetForumTopicHistory(chatId, threadId.toInt(), fromMessageId, 0, limit)
+        } else {
+            TdApi.GetChatHistory(chatId, fromMessageId, 0, limit, false)
+        }
+
+        client?.send(function) { result ->
+            if (chatId != currentChatId || threadId != currentThreadId) return@send
+            if (result is TdApi.Messages) {
+                val msgs = result.messages.toList().sortedByDescending { it.date }
+                _messagesFlow.value = msgs.distinctBy { it.id }
+                val idx = msgs.indexOfFirst { it.id == targetMessageId }
+                onLoaded(if (idx >= 0) idx else 0)
+            } else {
+                Log.e("TDLibChat", "loadMessagesFromId error: $result")
+                onLoaded(0)
+            }
+        }
+    }
+
+    fun sendMessage(chatId: Long, text: String, threadId: Long = 0) {
         val inputMessageContent = TdApi.InputMessageText(
             TdApi.FormattedText(text, emptyArray()), 
             null, // linkPreviewOptions
@@ -430,7 +555,7 @@ object TelegramClient {
         )
         val sendMessageRequest = TdApi.SendMessage(
             chatId, 
-            null, // topicId
+            if (threadId != 0L) TdApi.MessageTopicForum(threadId.toInt()) else null, 
             null, // replyTo
             null, // options
             null, // replyMarkup
@@ -440,7 +565,33 @@ object TelegramClient {
              Log.d("TDLib", "SendMessage result: $result")
         }
     }
-    
+
+    enum class MediaType { PHOTO, VIDEO, AUDIO, DOCUMENT }
+
+    fun sendMediaMessage(chatId: Long, filePath: String, mimeType: String, threadId: Long = 0) {
+        val topicId = if (threadId != 0L) TdApi.MessageTopicForum(threadId.toInt()) else null
+        val localFile = TdApi.InputFileLocal(filePath)
+        val content: TdApi.InputMessageContent = when {
+            mimeType == "audio/voice" -> TdApi.InputMessageVoiceNote(
+                localFile, 0, byteArrayOf(), null, null
+            )
+            mimeType.startsWith("image/") -> TdApi.InputMessagePhoto(
+                localFile, null, intArrayOf(), 0, 0, null, false, null, false
+            )
+            mimeType.startsWith("video/") -> TdApi.InputMessageVideo(
+                localFile, null, null, 0, intArrayOf(), 0, 0, 0, true, null, false, null, false
+            )
+            mimeType.startsWith("audio/") -> TdApi.InputMessageAudio(
+                localFile, null, 0, "", "", null
+            )
+            else -> TdApi.InputMessageDocument(localFile, null, false, null)
+        }
+        val request = TdApi.SendMessage(chatId, topicId, null, null, null, content)
+        client?.send(request) { result ->
+            Log.d("TDLib", "SendMedia result: $result")
+        }
+    }
+
     fun getChatInfo(chatId: Long, onResult: (TdApi.Chat?) -> Unit) {
         val chat = chatMap[chatId]
         if (chat != null) {
@@ -455,6 +606,33 @@ object TelegramClient {
                 }
             }
         }
+    }
+
+    /** Search Telegram server for chats matching [query]. Returns up to [limit] Chat objects. */
+    fun searchChatsGlobal(query: String, limit: Int = 20, onResult: (List<TdApi.Chat>) -> Unit) {
+        if (query.isBlank()) { onResult(emptyList()); return }
+        client?.send(TdApi.SearchChatsOnServer(query, limit)) { result ->
+            if (result is TdApi.Chats) {
+                val ids = result.chatIds
+                if (ids.isEmpty()) { onResult(emptyList()); return@send }
+                val resolved = mutableListOf<TdApi.Chat>()
+                var remaining = ids.size
+                ids.forEach { id ->
+                    getChatInfo(id) { chat ->
+                        synchronized(resolved) {
+                            if (chat != null) resolved.add(chat)
+                            remaining--
+                            if (remaining == 0) {
+                                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                    onResult(resolved)
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                android.os.Handler(android.os.Looper.getMainLooper()).post { onResult(emptyList()) }
+            }
         }
     }
 
@@ -463,6 +641,101 @@ object TelegramClient {
             if (result is TdApi.ForumTopic) {
                 onResult(result)
             } else {
+                onResult(null)
+            }
+        }
+    }
+
+    fun getForumTopics(chatId: Long, onResult: (TdApi.ForumTopics?) -> Unit) {
+        client?.send(TdApi.GetForumTopics(chatId, "", 0, 0, 0, 50)) { result ->
+            if (result is TdApi.ForumTopics) {
+                onResult(result)
+            } else {
+                onResult(null)
+            }
+        }
+    }
+    fun getChatPinnedMessage(chatId: Long, onResult: (TdApi.Message?) -> Unit) {
+        client?.send(TdApi.GetChatPinnedMessage(chatId)) { result ->
+            if (result is TdApi.Message) {
+                onResult(result)
+            } else {
+                onResult(null)
+            }
+        }
+    }
+
+    fun getPinnedMessages(chatId: Long, fromMessageId: Long = 0, limit: Int = 50, onResult: (List<TdApi.Message>) -> Unit) {
+        client?.send(TdApi.SearchChatMessages(
+            chatId,
+            null, // topic_id
+            "", // query
+            null, // sender
+            fromMessageId,
+            0, // offset
+            limit,
+            TdApi.SearchMessagesFilterPinned()
+        )) { result ->
+            if (result is TdApi.FoundChatMessages) {
+                onResult(result.messages.toList())
+            } else {
+                onResult(emptyList())
+            }
+        }
+    }
+
+    fun deleteMessages(chatId: Long, messageIds: LongArray, revoke: Boolean) {
+        client?.send(TdApi.DeleteMessages(chatId, messageIds, revoke)) { result ->
+            if (result is TdApi.Error) {
+                Log.e("TDLib", "Delete messages error: ${result.message}")
+            } else {
+                Log.d("TDLib", "Messages deleted successfully")
+            }
+        }
+    }
+
+    fun toggleChatIsPinned(chatId: Long, isPinned: Boolean) {
+        client?.send(TdApi.ToggleChatIsPinned(TdApi.ChatListMain(), chatId, isPinned)) { result ->
+            if (result is TdApi.Error) Log.e("TDLib", "Toggle pin error: ${result.message}")
+        }
+    }
+
+    fun toggleChatIsMarkedAsUnread(chatId: Long, isMarkedAsUnread: Boolean) {
+        client?.send(TdApi.ToggleChatIsMarkedAsUnread(chatId, isMarkedAsUnread)) { result ->
+            if (result is TdApi.Error) Log.e("TDLib", "Toggle unread error: ${result.message}")
+        }
+    }
+
+    fun deleteChatHistory(chatId: Long, removeFromChatList: Boolean, revoke: Boolean) {
+        client?.send(TdApi.DeleteChatHistory(chatId, removeFromChatList, revoke)) { result ->
+            if (result is TdApi.Error) Log.e("TDLib", "Delete history error: ${result.message}")
+        }
+    }
+
+    fun deleteChat(chatId: Long) {
+        client?.send(TdApi.DeleteChat(chatId)) { result ->
+            if (result is TdApi.Error) Log.e("TDLib", "Delete chat error: ${result.message}")
+        }
+    }
+
+    fun blockUser(userId: Long) {
+        client?.send(TdApi.SetMessageSenderBlockList(TdApi.MessageSenderUser(userId), TdApi.BlockListMain())) { result ->
+            if (result is TdApi.Error) Log.e("TDLib", "Block user error: ${result.message}")
+        }
+    }
+
+    fun leaveChat(chatId: Long) {
+        client?.send(TdApi.LeaveChat(chatId)) { result ->
+            if (result is TdApi.Error) Log.e("TDLib", "Leave chat error: ${result.message}")
+        }
+    }
+
+    fun getInternalLinkInfo(link: String, onResult: (TdApi.InternalLinkType?) -> Unit) {
+        client?.send(TdApi.GetInternalLinkType(link)) { result ->
+            if (result is TdApi.InternalLinkType) {
+                onResult(result)
+            } else {
+                Log.e("TDLibLink", "Failed to get internal link type for $link: $result")
                 onResult(null)
             }
         }
