@@ -1,0 +1,28 @@
+# Built application files
+*.apk
+*.aab
+*.ap_
+*.aapt
+
+# Local configuration file (sdk path, etc)
+local.properties
+
+# Gradle files
+.gradle/
+build/
+*/build/
+
+# IDE files
+.idea/
+*.iml
+*.iws
+
+# Log and temp files
+*.log
+*.txt
+*_pid.txt
+test_tmp/
+tmp/
+
+# TDLib cache
+tdlib/
